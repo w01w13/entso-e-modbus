@@ -49,6 +49,12 @@ SoftwareSerial MAX_485(RX_PIN, TX_PIN);
 // Reset token
 bool reset = false;
 String reset_token;
+
+union f_2uint {
+    float f;
+    uint16_t i[2];
+};
+
 void refresh()
 {
     Serial.printf("START: Retrieving values, update is %lu\n", nextUpdate);
@@ -194,11 +200,33 @@ void resetRegistry()
 void updateRegistry()
 {
     for (unsigned int i = 0; i < sizeof(priceData) / sizeof(double); i++) {
-        double price = priceData[i];
-        Serial.printf("Price %d in memory is: %f\n", i, price);
-        rtuSlave.addHreg(i + 1, price, 1);
-        tcpSlave.addHreg(i + 1, price, 1);
+        int offset = (i * 2) + 1;
+        float price = (float)priceData[i];
+        // https://github.com/emelianov/modbus-esp8266/issues/158
+        // TODO: Figure out more compact way to do this
+        f_2uint reg = f_2uint_int(price); // split the float into 2 unsigned integers
+        Serial.printf("Price %d in memory is: %f at offset %u\n", i, price, offset);
+        // Code for reversefloat modbus
+        // TODO: Fix the double to float conversion, currenly causes rounding errors
+        // but it not critical as we're talking about fractions of cents.
+        for (int j = 0; j < 3; j++) {
+            tcpSlave.addHreg(offset + j, reg.i[j], 1);
+            rtuSlave.addHreg(offset + j, reg.i[j], 1);
+        }
+
+        // tcpSlave.addHreg(offset, reg.i[0], 1);
+        //  tcpSlave.addHreg(offset + 1, reg.i[1], 1);
+        //  rtuSlave.addHreg(offset, reg.i[0], 1);
+        //  rtuSlave.addHreg(offset + 1, reg.i[1], 1);
     }
+}
+
+f_2uint f_2uint_int(double float_number)
+{ // split the float and return first unsigned integer
+    union f_2uint f_number;
+    f_number.f = float_number;
+
+    return f_number;
 }
 
 void setup()
