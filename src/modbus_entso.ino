@@ -8,12 +8,17 @@
 #include <ESP8266mDNS.h>
 #include <NTPClient.h>
 #include <SoftwareSerial.h>
+#include <StringTokenizer.h>
 #include <WiFiManager.h>
 #include <WiFiUdp.h>
 
 #define BAUD_RATE 9600
 #define SLAVE_ID 100
 #define NUM_REGS 49
+#define TOKEN_LENGTH 36
+#define TAX_LENGTH 2
+#define MARGIN_LENGTH 4
+#define UNIT_LENGTH 1
 
 ESP8266WebServer server;
 
@@ -27,17 +32,26 @@ ESP8266WebServer server;
 #define RX_PIN 2
 // Wifi
 WiFiManager wm; // global wm instance
-WiFiManagerParameter custom_field; // global param ( for non blocking w params )
+
 bool wm_nonblocking = false; // change to true to use non blocking
 int status;
 // Entso-E token
 String token = "";
+// Tax, defaults to company
+String tax = "0.0";
+// Margin, defaults to zero
+String margin = "0.00";
+// Should have prices in KWh / Mwh
+// 1 is eur/MWh, 0 is cents/KWh
+String selectedPrice = "0";
 // mDNS
 String mDnsName = "entso-modbus";
 // Price data & control params
-double priceData[NUM_REGS];
+double* priceData;
+int* priceLen;
 unsigned long nextUpdate = 0;
 unsigned long now = 0;
+bool hasValues = false;
 // NTP
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP);
@@ -58,15 +72,20 @@ union f_2uint {
 void refresh()
 {
     Serial.printf("START: Retrieving values, update is %lu\n", nextUpdate);
-    status = entso_e_refresh(token.c_str(), priceData);
+    free(priceData);
+    free(priceLen);
+    status = entso_e_refresh(token.c_str(), &priceData, &priceLen);
     Serial.printf("Got status %i\n", status);
     // Reset the status
     // TODO: Should we move this as coil? Hack, figure out proper way to update the HREG
     rtuSlave.removeHreg(0, 1);
     rtuSlave.addHreg(0, status, 1);
-    if (status != 0) {
+    // If intial read fails, dont put values in registry.
+    // If other requests fail, we've the values
+    if (status != 0 && !hasValues) {
         Serial.println("Invalid read");
     } else {
+        hasValues = true;
         resetRegistry(); // Clear existing values. Hack, figure out proper way to update the HREG.
         Serial.println("Read successfull");
         updateRegistry();
@@ -78,36 +97,65 @@ void configModeCallback(WiFiManager* myWiFiManager)
     Serial.println(WiFi.softAPIP());
     Serial.println(myWiFiManager->getConfigPortalSSID());
 }
+
+int saveToEeprom(String value, unsigned int len, unsigned int offset)
+{
+    if (value) {
+        for (unsigned int i = 0; i < len; ++i) {
+            EEPROM.write(i + offset, value[i]);
+        }
+    }
+    return len;
+}
+String readFromEeprom(unsigned int len, unsigned int offset)
+{
+    String tmp;
+    for (unsigned int i = offset; i < len + offset; ++i) {
+        char c = char(EEPROM.read(i));
+        if (c != '\0') {
+            tmp += c;
+        }
+    }
+    return tmp;
+}
 void saveParamCallback()
 {
+    token = getParam("entso");
+    tax = getParam("tax");
+    margin = getParam("margin");
+    Serial.println("Entso-E token is " + token);
+    Serial.println("Tax is " + tax);
+    Serial.println("Margin is " + margin);
+    int offset = 0;
     EEPROM.begin(512);
-    token = getParam("customfieldid");
-    if (token) {
-        Serial.println("Entso-E token is " + token);
-        Serial.println("Entso-E token length is " + token.length());
-        for (unsigned int i = 0; i < token.length(); ++i) {
-            EEPROM.write(i, token[i]);
-        }
-        EEPROM.commit();
-        EEPROM.end();
-    } else {
-        Serial.println("Entso-E token i null");
-        wm.resetSettings();
-    }
+    offset += saveToEeprom(token, TOKEN_LENGTH, offset);
+    offset += saveToEeprom(tax, TAX_LENGTH, offset);
+    offset += saveToEeprom(margin, MARGIN_LENGTH, offset);
+    offset += saveToEeprom(selectedPrice, UNIT_LENGTH, offset);
+    EEPROM.commit();
+    EEPROM.end();
+    eeprom_read();
 }
 void eeprom_read()
 {
     EEPROM.begin(512);
-    token = "";
-    if (EEPROM.read(0) != 0) {
-        for (int i = 0; i < 40; ++i) {
-            token += char(EEPROM.read(i));
-        }
-        Serial.print("Token: ");
-        Serial.println(token);
-    } else {
-        Serial.println("Token not found.");
-    }
+    int offset = 0;
+    token = readFromEeprom(TOKEN_LENGTH, offset);
+    offset += TOKEN_LENGTH;
+    Serial.print("Token is ");
+    Serial.println(token);
+    tax = readFromEeprom(TAX_LENGTH, offset);
+    offset += TAX_LENGTH;
+    Serial.print("Tax is ");
+    Serial.println(tax.toDouble());
+    margin = readFromEeprom(MARGIN_LENGTH, offset);
+    offset += MARGIN_LENGTH;
+    Serial.print("Margin is ");
+    Serial.println(margin.toDouble());
+    selectedPrice = readFromEeprom(UNIT_LENGTH, offset);
+    offset += UNIT_LENGTH;
+    Serial.print("Unit is ");
+    Serial.println(selectedPrice);
     EEPROM.end();
 }
 String getParam(String name)
@@ -119,38 +167,76 @@ String getParam(String name)
     }
     return value;
 }
+
 void handleRoot()
 {
     String s
-        = "<html><head><title>Entso2Modbus</title><style>body {display: flex; flex-direction: column; overflow: "
-          "hidden; max-height: 100vh; font-family: Arial, sans-serif;} .submit:hover {cursor: pointer; "
-          "background-color: "
-          "#cc0000; color: white;}.submit {transition-duration: 0.4s; border-radius: 10px; background-color: "
-          "#ff0000;  border: none;  color: "
-          "white;  padding: 20px;  text-align: center;  text-decoration: none;  display: inline-block;  "
-          "font-size: 16px;  margin: 4px 2px;} .container {display: flex; flex-direction: column; overflow: scroll;} "
-          ".actions {display: flex; justify-content: right;}.data { flex: 1;"
-          "}table {  border-collapse: collapse;  border-spacing: 0;  width: 100%;  border: 1px "
-          "solid #ddd;}th, td {  text-align: left;  padding: 16px;}tr:nth-child(even) {  background-color: "
-          "#f2f2f2;}</style></head><body>";
-    char link[123];
-    sprintf(link,
-        "<div class='actions'><form action='%s'> <input type='submit' class='submit' value='Reset Settings' "
-        "/></form></div>",
+        = "<!DOCTYPE html><html><head><title>Entso2Modbus</title><style>label {margin: 2px;} select { height: 1.8em; "
+          "border: unset; width: 100%; font-size: 16px; line-height: 1.2em;} input::-webkit-outer-spin-button, "
+          "input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; } .data-container { display: block; "
+          "} input[type=number] { -moz-appearance: textfield; } .form-wrapper { margin: 10px; } .full-input { display: "
+          "inline-block; padding: 3px; border: 1px solid black; border-radius: 6px; } input { outline: none; border: "
+          "none; display: block; line-height: 1.2em; font-size: 14pt; } label { display: block; font-size: 12px; "
+          "color: black; } html { display: grid; } body { display: grid; font-family: Arial, Helvetica, sans-serif; } "
+          ".save-container { display: flex; justify-content: end; } .action-form-container { display: grid; "
+          "grid-template-columns: auto auto; } .form-container { display: grid; margin: 4em; } .form { display: grid; "
+          "grid-template-columns: auto; gap: 1em; } .navigation-item:hover { background-color: #ddd; } .tabcontent { "
+          "display: none; padding: 6px 12px; border: 1px solid #ccc; border-top: none; } .navigation-item { "
+          "background-color: inherit; float: left; border: none; outline: none; cursor: pointer; padding: 14px 16px; "
+          "transition: 0.3s; font-size: 17px; } .action-button:hover { cursor: pointer; filter: brightness(50%); "
+          "color: white; } .action-button { transition-duration: 0.4s; border-radius: 10px; border: none; color: "
+          "white; padding: 20px; text-align: center; text-decoration: none; display: inline-block; font-size: 16px; "
+          "margin: 4px 2px; } .submit { background-color: #ff0000; } .save { background-color: #3cb371 } .actions { "
+          "display: flex; align-items: end; justify-content: end; } table { border-collapse: collapse; border-spacing: "
+          "0; width: 100%; border: 1px solid #ddd; } th, td { text-align: left; padding: 16px; } tr:nth-child(even) { "
+          "background-color: #f2f2f2; } </style></head><body onLoad=\"openTab(event, 'data-container')\"><script> function openTab(evt, tabName) { var i, "
+          "tabcontent, tablinks; tabcontent = document.getElementsByClassName('tabcontent'); for (i = 0; i < "
+          "tabcontent.length; i++) { tabcontent[i].style.display = 'none'; } tablinks = "
+          "document.getElementsByClassName('tablinks'); for (i = 0; i < tablinks.length; i++) { tablinks[i].className "
+          "= tablinks[i].className.replace(' active', ''); } document.getElementById(tabName).style.display = 'block'; "
+          "evt.currentTarget.className += ' active'; } </script><div class='navigation'><button "
+          "class='navigation-item active' onclick=\"openTab(event, 'data-container')\">Data</button><button "
+          "class='navigation-item' onclick=\"openTab(event, 'action-container')\">Configuration</button></div><div "
+          "class='tabcontent' id='action-container'><div class='action-form-container'><div "
+          "class='form-container'><form action='save' method='POST'><div class='form'><div class='full-input'><label "
+          "for='token'>Entso-E Token</label><input id='token' name='token' maxlength=36 type='password' value='";
+    s += token;
+    s += "' /></div><div "
+         "class='full-input'><label for='tax'>VAT</label><input id='tax' name='tax' type='number' value='";
+    s += tax;
+    s += "' /></div><div "
+         "class='full-input'><label for='margin'>Margin</label><input id='margin' name='margin' type='number' "
+         "step='.01' value='";
+    s += margin;
+    s += "' /></div>";
+    s += "<div class='full-input'><label for='unit'>Output unit</label><select name='unit' id='unit' "
+         "name='unit'>";
+    s += "<option value='0'";
+    if (selectedPrice == "0") {
+        s += "selected";
+    }
+    s += ">KWh/Cents</option><option value='1'";
+    if (selectedPrice == "1") {
+        s += "selected";
+    }
+    s += ">MWh/Eur</option></select></div>";
+    s += "<br><div class='save-container'><input type='submit' class='save action-button' "
+         "value='Save Settings' /></div></div></form></div><div class='form-container'><div class='actions'>";
+    char link[140];
+    sprintf(link, "<form action='%s'> <input type='submit' class='submit action-button' value='Reset Wifi' /></form>",
         reset_token.c_str());
     s += link;
-    s += "<div class='container'><div class='data'><table><tr><th>Index</th><th>Value</th></tr>";
+    s += "</div></div></div></div><div class='tabcontent' id='data-container'><div "
+         "class='data'><table><tr><th>Index</th><th>Value</th></tr>";
     char state[50];
     sprintf(state, "<tr><td>%d</td><td>%d</td></tr>", 0, status);
     s += state;
-    for (unsigned int i = 0; i < sizeof(priceData) / sizeof(double); i++) {
+    for (int i = 0; i < *priceLen; i++) {
         char line[50];
-        sprintf(line, "<tr><td>%d</td><td>%f</td></tr>", i + 1, priceData[i]);
+        sprintf(line, "<tr><td>%d</td><td>%f</td></tr>", i + 1, getPrice((float)priceData[i]));
         s += line;
     }
-    s += "</div></table>";
-
-    s += "</body></html>";
+    s += "</table></div></div></body></html>";
     server.send(200, "text/html", s);
 }
 void handleReset()
@@ -159,6 +245,43 @@ void handleReset()
     server.send(200, "text/plain", "Settings reset");
 }
 
+void handleGet() { server.send(200, "application/json", "Settings reset"); }
+void handleSave()
+{
+    // Check if body received
+    if (server.hasArg("plain") == false) {
+        server.send(200, "text/plain", "Body not received");
+    } else {
+        StringTokenizer tokens(server.arg("plain"), "&");
+        int offset = 0;
+        EEPROM.begin(512);
+
+        while (tokens.hasNext()) {
+            String val = tokens.nextToken();
+            String key = val.substring(0, val.indexOf("="));
+            if (key == "token") {
+                token = val.substring(val.indexOf("=") + 1, val.length());
+                offset += saveToEeprom(token, TOKEN_LENGTH, offset);
+            } else if (key == "tax") {
+                tax = val.substring(val.indexOf("=") + 1, val.length());
+                offset += saveToEeprom(tax, TAX_LENGTH, offset);
+            } else if (key == "margin") {
+                margin = val.substring(val.indexOf("=") + 1, val.length());
+                offset += saveToEeprom(margin, MARGIN_LENGTH, offset);
+            } else if (key == "unit") {
+                selectedPrice = val.substring(val.indexOf("=") + 1, val.length());
+                offset += saveToEeprom(selectedPrice, UNIT_LENGTH, offset);
+            } else {
+                Serial.println("Unknown " + key);
+            }
+        }
+        EEPROM.commit();
+        EEPROM.end();
+        eeprom_read();
+        handleNotFound();
+    }
+    return;
+}
 void handleNotFound()
 {
     server.sendHeader("Location", "/");
@@ -168,11 +291,7 @@ void handleNotFound()
 void resetSettings()
 {
     wm.resetSettings();
-    EEPROM.begin(512);
-    for (int i = 0; i < 512; i++) {
-        EEPROM.write(i, 0);
-    }
-    EEPROM.end();
+    handleNotFound();
     ESP.restart();
 }
 void generate_reset_token()
@@ -181,35 +300,69 @@ void generate_reset_token()
     Serial.println("Generated reset token:");
     Serial.println(reset_token);
 }
-void createRegistry()
-{
-    for (unsigned int i = 0; i < sizeof(priceData) / sizeof(double); i++) {
-        rtuSlave.addHreg(i + 1, 0, 1);
-        tcpSlave.addHreg(i + 1, 0, 1);
-    }
-}
 
 void resetRegistry()
 {
-    for (unsigned int i = 0; i < sizeof(priceData) / sizeof(double); i++) {
+    Serial.println("Resetting registry");
+    for (int i = 0; i < *priceLen; i++) {
         rtuSlave.removeHreg(i + 1, 1);
         tcpSlave.removeHreg(i + 1, 1);
     }
 }
 
+float addMargin(float price)
+{
+    if (margin) {
+        return price + (margin.toFloat() * 10);
+    } else {
+        return price;
+    }
+}
+float addVat(float price)
+{
+    if (tax) {
+        float tmp = price;
+        float vat = tax.toFloat() / 100;
+        if (vat > 0 && tmp > 0) {
+            tmp += (tmp * vat);
+        }
+        return tmp;
+    } else {
+        return price;
+    }
+}
+
+float convertPrice(float price)
+{
+    if (selectedPrice && selectedPrice == "0") {
+        return price / 10;
+    } else {
+        return price;
+    }
+}
+
+float getPrice(float price)
+{
+    float tmp = addVat(price);
+    tmp = addMargin(tmp);
+    return convertPrice(tmp);
+}
 void updateRegistry()
 {
-    for (unsigned int i = 0; i < sizeof(priceData) / sizeof(double); i++) {
+    Serial.printf("Prices in memory:\u0020[");
+    for (int i = 0; i < *priceLen; i++) {
         int offset = (i * 2) + 1;
-        float price = (float)priceData[i];
+        float price = getPrice((float)priceData[i]);
         // https://github.com/emelianov/modbus-esp8266/issues/158
-        // TODO: Figure out more compact way to do this
         f_2uint reg = f_2uint_int(price); // split the float into 2 unsigned integers
-        Serial.printf("Price %d in memory is: %f at offset %u\n", i, price, offset);
+        if (i == (*priceLen - 1)) {
+            Serial.printf("%f]\n", price);
+        } else {
+            Serial.printf("%f,\u0020", price);
+        }
         // Code for reversefloat modbus
-        // TODO: Fix the double to float conversion, currenly causes rounding errors
-        // but it not critical as we're talking about fractions of cents.
-        for (int j = 0; j < 3; j++) {
+        // TODO: Print out the values in hex so we can match them in modbus end
+        for (int j = 0; j < 2; j++) {
             tcpSlave.addHreg(offset + j, reg.i[j], 1);
             rtuSlave.addHreg(offset + j, reg.i[j], 1);
         }
@@ -236,14 +389,9 @@ void setup()
     Serial.begin(115200);
     timeClient.begin(); // Start NTP
     delay(3000);
-    if (wm_nonblocking)
+    if (wm_nonblocking) {
         wm.setConfigPortalBlocking(false);
-    int customFieldLength = 40;
-
-    new (&custom_field) WiFiManagerParameter("customfieldid", "Entso-E token", "", customFieldLength);
-    ; // custom html type
-    wm.addParameter(&custom_field);
-    wm.setSaveParamsCallback(saveParamCallback);
+    }
     bool res = wm.autoConnect(mDnsName.c_str(), "password"); // password protected ap
     if (!res) {
         Serial.println("Failed to connect or hit timeout");
@@ -255,6 +403,7 @@ void setup()
         server.onNotFound(handleNotFound);
         server.on("/", handleRoot);
         server.on("/" + reset_token, handleReset);
+        server.on("/save", handleSave);
         server.begin(80);
         if (!MDNS.begin(mDnsName)) {
             Serial.println("Error setting up MDNS responder!");
@@ -269,7 +418,6 @@ void setup()
     rtuSlave.begin(&MAX_485); // Modbus RTU start
     rtuSlave.slave(SLAVE_ID);
     tcpSlave.begin(); // Modbus TCP start
-    createRegistry(); // Create HREG
 }
 
 void loop()
