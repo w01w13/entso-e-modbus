@@ -10,6 +10,7 @@ Holding register:
 | Offset  | Description   |
 |---|---|
 0    |  Read status (0 = Read success, other statuses are HTTP response statuses (for example 401 means Authorization failed, most likely invalid Entso-E token))
-1...n | Price in Eur/MHw, slot 1 is current hour, 2 next hour etc. Will automatically rotate prices every hour.
+1...n | Price in configured output format (with TAX / margin if configured). slot 1 is current hour, 2 next hour etc. Will automatically rotate prices every hour.
 
 Work in progress.
+
