@@ -12,13 +12,13 @@
 #include <WiFiManager.h>
 #include <WiFiUdp.h>
 
-#define BAUD_RATE 9600
-#define SLAVE_ID 100
 #define NUM_REGS 49
 #define TOKEN_LENGTH 36
 #define TAX_LENGTH 2
 #define MARGIN_LENGTH 4
 #define UNIT_LENGTH 1
+#define BAUD_LENGTH 6
+#define SLAVE_LENGTH 3
 
 ESP8266WebServer server;
 
@@ -35,6 +35,10 @@ WiFiManager wm; // global wm instance
 
 bool wm_nonblocking = false; // change to true to use non blocking
 int status;
+// Modbus
+String baudRates[] = { "9600", "19200", "38400", "57600", "115200" };
+String baudRate = "9600";
+String slaveId = "100";
 // Entso-E token
 String token = "";
 // Tax, defaults to company
@@ -63,11 +67,6 @@ SoftwareSerial MAX_485(RX_PIN, TX_PIN);
 // Reset token
 bool reset = false;
 String reset_token;
-
-union f_2uint {
-    float f;
-    uint16_t i[2];
-};
 
 void refresh()
 {
@@ -156,6 +155,14 @@ void eeprom_read()
     offset += UNIT_LENGTH;
     Serial.print("Unit is ");
     Serial.println(selectedPrice);
+    baudRate = readFromEeprom(BAUD_LENGTH, offset);
+    offset += BAUD_LENGTH;
+    Serial.print("Baud is ");
+    Serial.println(baudRate);
+    slaveId = readFromEeprom(SLAVE_LENGTH, offset);
+    offset += SLAVE_LENGTH;
+    Serial.print("SlaveId is ");
+    Serial.println(slaveId);
     EEPROM.end();
 }
 String getParam(String name)
@@ -171,8 +178,9 @@ String getParam(String name)
 void handleRoot()
 {
     String s
-        = "<!DOCTYPE html><html><head><title>Entso2Modbus</title><style>label {margin: 2px;} select { height: 1.8em; "
-          "border: unset; width: 100%; font-size: 16px; line-height: 1.2em;} input::-webkit-outer-spin-button, "
+        = "<!DOCTYPE html><html><head><title>Entso2Modbus</title><style>.h2 {margin: 0} label {margin: 2px;} select { "
+          "height: 1.8em; "
+          "border: unset; width: 100%; font-size: 18px; line-height: 1.2em;} input::-webkit-outer-spin-button, "
           "input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; } .data-container { display: block; "
           "} input[type=number] { -moz-appearance: textfield; } .form-wrapper { margin: 10px; } .full-input { display: "
           "inline-block; padding: 3px; border: 1px solid black; border-radius: 6px; } input { outline: none; border: "
@@ -189,7 +197,8 @@ void handleRoot()
           "margin: 4px 2px; } .submit { background-color: #ff0000; } .save { background-color: #3cb371 } .actions { "
           "display: flex; align-items: end; justify-content: end; } table { border-collapse: collapse; border-spacing: "
           "0; width: 100%; border: 1px solid #ddd; } th, td { text-align: left; padding: 16px; } tr:nth-child(even) { "
-          "background-color: #f2f2f2; } </style></head><body onLoad=\"openTab(event, 'data-container')\"><script> function openTab(evt, tabName) { var i, "
+          "background-color: #f2f2f2; } </style></head><body onLoad=\"openTab(event, 'data-container')\"><script> "
+          "function openTab(evt, tabName) { var i, "
           "tabcontent, tablinks; tabcontent = document.getElementsByClassName('tabcontent'); for (i = 0; i < "
           "tabcontent.length; i++) { tabcontent[i].style.display = 'none'; } tablinks = "
           "document.getElementsByClassName('tablinks'); for (i = 0; i < tablinks.length; i++) { tablinks[i].className "
@@ -198,11 +207,14 @@ void handleRoot()
           "class='navigation-item active' onclick=\"openTab(event, 'data-container')\">Data</button><button "
           "class='navigation-item' onclick=\"openTab(event, 'action-container')\">Configuration</button></div><div "
           "class='tabcontent' id='action-container'><div class='action-form-container'><div "
-          "class='form-container'><form action='save' method='POST'><div class='form'><div class='full-input'><label "
-          "for='token'>Entso-E Token</label><input id='token' name='token' maxlength=36 type='password' value='";
+          "class='form-container'><form action='save' method='POST'><div class='form'>";
+    s += "<h2>Entso-E Settings</h2>";
+    s += "<div class='full-input'><label for='token'>Entso-E Token</label><input id='token' name='token' maxlength=36 "
+         "type='password' value='";
     s += token;
-    s += "' /></div><div "
-         "class='full-input'><label for='tax'>VAT</label><input id='tax' name='tax' type='number' value='";
+    s += "' /></div>";
+    s += "<h2>Price Settings</h2>";
+    s += "<div class='full-input'><label for='tax'>VAT</label><input id='tax' name='tax' type='number' value='";
     s += tax;
     s += "' /></div><div "
          "class='full-input'><label for='margin'>Margin</label><input id='margin' name='margin' type='number' "
@@ -215,11 +227,34 @@ void handleRoot()
     if (selectedPrice == "0") {
         s += "selected";
     }
-    s += ">KWh/Cents</option><option value='1'";
+    s += ">&cent;/KWh</option><option value='1'";
     if (selectedPrice == "1") {
         s += "selected";
     }
-    s += ">MWh/Eur</option></select></div>";
+    s += ">&euro;/MWh</option></select></div>";
+    // Modbus settings
+    s += "<h2>Modbus Settings</h2>";
+
+    int numBaudRates = sizeof(baudRates) / sizeof(baudRates[0]);
+    s += "<div class='full-input'><label for='baud'>Baud</label><select name='baud' id='baud' "
+         "name='baud'>";
+    for (int i = 0; i < numBaudRates; i++) {
+        String baud_rate = baudRates[i];
+        s += "<option value='";
+        s += baud_rate;
+        s += "'";
+        if (baud_rate == baudRate) {
+            s += "selected";
+        }
+        s += ">" + baud_rate + "</option>";
+    }
+    s += "</select></div>";
+    s += "<div class='full-input'><label for='slave'>SlaveID</label><input id='slave' name='slave' type='number' "
+         "maxLength='3' value='";
+    s += slaveId;
+    s += "'/></div>";
+    s += "<div class='full-input'><label for='serial'>Serial Information (readonly)</label><input id='serial' "
+         "value='8-N-1' readonly></div>";
     s += "<br><div class='save-container'><input type='submit' class='save action-button' "
          "value='Save Settings' /></div></div></form></div><div class='form-container'><div class='actions'>";
     char link[140];
@@ -255,7 +290,7 @@ void handleSave()
         StringTokenizer tokens(server.arg("plain"), "&");
         int offset = 0;
         EEPROM.begin(512);
-
+        bool shouldReset = false;
         while (tokens.hasNext()) {
             String val = tokens.nextToken();
             String key = val.substring(0, val.indexOf("="));
@@ -271,6 +306,14 @@ void handleSave()
             } else if (key == "unit") {
                 selectedPrice = val.substring(val.indexOf("=") + 1, val.length());
                 offset += saveToEeprom(selectedPrice, UNIT_LENGTH, offset);
+            } else if (key == "baud") {
+                shouldReset = true;
+                baudRate = val.substring(val.indexOf("=") + 1, val.length());
+                offset += saveToEeprom(baudRate, BAUD_LENGTH, offset);
+            } else if (key == "slave") {
+                shouldReset = true;
+                slaveId = val.substring(val.indexOf("=") + 1, val.length());
+                offset += saveToEeprom(slaveId, SLAVE_LENGTH, offset);
             } else {
                 Serial.println("Unknown " + key);
             }
@@ -278,7 +321,11 @@ void handleSave()
         EEPROM.commit();
         EEPROM.end();
         eeprom_read();
-        handleNotFound();
+        if (shouldReset) {
+            ESP.restart();
+        } else {
+            handleNotFound();
+        }
     }
     return;
 }
@@ -351,35 +398,33 @@ void updateRegistry()
 {
     Serial.printf("Prices in memory:\u0020[");
     for (int i = 0; i < *priceLen; i++) {
-        int offset = (i * 2) + 1;
+        int offset = (i * 2) + 2;
         float price = getPrice((float)priceData[i]);
         // https://github.com/emelianov/modbus-esp8266/issues/158
-        f_2uint reg = f_2uint_int(price); // split the float into 2 unsigned integers
+        uint16_t high, low;
+        float2IEEE754(price, &high, &low);
+        tcpSlave.addHreg(offset, high, 1);
+        tcpSlave.addHreg(offset + 1, low, 1);
+        rtuSlave.addHreg(offset, high, 1);
+        rtuSlave.addHreg(offset + 1, low, 1);
         if (i == (*priceLen - 1)) {
             Serial.printf("%f]\n", price);
         } else {
             Serial.printf("%f,\u0020", price);
         }
-        // Code for reversefloat modbus
-        // TODO: Print out the values in hex so we can match them in modbus end
-        for (int j = 0; j < 2; j++) {
-            tcpSlave.addHreg(offset + j, reg.i[j], 1);
-            rtuSlave.addHreg(offset + j, reg.i[j], 1);
-        }
-
-        // tcpSlave.addHreg(offset, reg.i[0], 1);
-        //  tcpSlave.addHreg(offset + 1, reg.i[1], 1);
-        //  rtuSlave.addHreg(offset, reg.i[0], 1);
-        //  rtuSlave.addHreg(offset + 1, reg.i[1], 1);
     }
 }
 
-f_2uint f_2uint_int(double float_number)
+void float2IEEE754(double float_number, uint16_t* high, uint16_t* low)
 { // split the float and return first unsigned integer
-    union f_2uint f_number;
-    f_number.f = float_number;
-
-    return f_number;
+    union {
+        float f;
+        uint32_t u;
+    } data;
+    data.f = float_number;
+    uint32_t ieee754 = data.u;
+    *high = (uint16_t)(ieee754 >> 16);
+    *low = ieee754;
 }
 
 void setup()
@@ -414,9 +459,9 @@ void setup()
     pinMode(RX_ENABLE, OUTPUT);
     // digitalWrite(TX_ENABLE, LOW);
     digitalWrite(RX_ENABLE, LOW);
-    MAX_485.begin(BAUD_RATE, SWSERIAL_8N1);
+    MAX_485.begin(baudRate.toInt(), SWSERIAL_8N1);
     rtuSlave.begin(&MAX_485); // Modbus RTU start
-    rtuSlave.slave(SLAVE_ID);
+    rtuSlave.slave(slaveId.toInt());
     tcpSlave.begin(); // Modbus TCP start
 }
 

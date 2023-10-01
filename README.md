@@ -25,5 +25,3 @@ Configuration view
 Reading values with Modbus Master
 
 ![image](https://github.com/w01w13/entso-e-modbus/assets/6333419/e4a023a0-4b59-4932-8126-85e059eafb7b)
-
-NOTE: Seems like the modbus master is handling the 32 single-precision values as 64-bit double precision thus resulting to erroneous values eventhough the hexvalue is correct. Need to double check whether this is a issue in implementation or in Modbus Master
