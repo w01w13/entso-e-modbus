@@ -145,10 +145,16 @@ void eeprom_read()
     Serial.println(token);
     tax = readFromEeprom(TAX_LENGTH, offset);
     offset += TAX_LENGTH;
+    if (tax == NULL) {
+        tax = "0";
+    }
     Serial.print("Tax is ");
     Serial.println(tax.toDouble());
     margin = readFromEeprom(MARGIN_LENGTH, offset);
     offset += MARGIN_LENGTH;
+    if (margin == NULL) {
+        margin = "0";
+    }
     Serial.print("Margin is ");
     Serial.println(margin.toDouble());
     selectedPrice = readFromEeprom(UNIT_LENGTH, offset);
@@ -157,10 +163,16 @@ void eeprom_read()
     Serial.println(selectedPrice);
     baudRate = readFromEeprom(BAUD_LENGTH, offset);
     offset += BAUD_LENGTH;
+    if (baudRate == NULL) {
+        baudRate = "9600";
+    }
     Serial.print("Baud is ");
     Serial.println(baudRate);
     slaveId = readFromEeprom(SLAVE_LENGTH, offset);
     offset += SLAVE_LENGTH;
+    if (slaveId == NULL) {
+        slaveId = "100";
+    }
     Serial.print("SlaveId is ");
     Serial.println(slaveId);
     EEPROM.end();
