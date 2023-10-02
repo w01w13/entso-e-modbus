@@ -368,8 +368,8 @@ void createRegistry()
 {
     Serial.println("Creating registry");
     for (int i = 0; i < NUM_REGS; i++) {
-        rtuSlave.addHreg(i + 1, 1);
-        tcpSlave.addHreg(i + 1, 1);
+        rtuSlave.addHreg(i, 1);
+        tcpSlave.addHreg(i, 1);
     }
 }
 
@@ -427,11 +427,10 @@ void updateRegistry()
         } else {
             Serial.printf("%f,\u0020", price);
         }
-        count += offset;
+        count += 2;
     }
     // Pad the rest so the receiving end will reset the values
-    for (size_t i = count; i < NUM_REGS; i++) {
-        Serial.printf("Padding %u\n", i);
+    for (int i = count; i <= NUM_REGS; i++) {
         addToHreg(i, 0);
         addToHreg(i + 1, 0);
     }
