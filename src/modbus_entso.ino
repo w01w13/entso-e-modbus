@@ -12,7 +12,7 @@
 #include <WiFiManager.h>
 #include <WiFiUdp.h>
 
-#define NUM_REGS 49
+#define NUM_REGS 72
 #define TOKEN_LENGTH 36
 #define TAX_LENGTH 2
 #define MARGIN_LENGTH 4
@@ -77,18 +77,22 @@ void refresh()
     Serial.printf("Got status %i\n", status);
     // Reset the status
     // TODO: Should we move this as coil? Hack, figure out proper way to update the HREG
-    rtuSlave.removeHreg(0, 1);
-    rtuSlave.addHreg(0, status, 1);
+    addToHreg(0, status);
+    addToHreg(1, 0);
     // If intial read fails, dont put values in registry.
     // If other requests fail, we've the values
     if (status != 0 && !hasValues) {
         Serial.println("Invalid read");
     } else {
         hasValues = true;
-        resetRegistry(); // Clear existing values. Hack, figure out proper way to update the HREG.
         Serial.println("Read successfull");
         updateRegistry();
     }
+}
+void addToHreg(int offset, uint16_t value)
+{
+    rtuSlave.Hreg(offset, value);
+    rtuSlave.Hreg(offset, value);
 }
 void configModeCallback(WiFiManager* myWiFiManager)
 {
@@ -360,12 +364,12 @@ void generate_reset_token()
     Serial.println(reset_token);
 }
 
-void resetRegistry()
+void createRegistry()
 {
-    Serial.println("Resetting registry");
-    for (int i = 0; i < *priceLen; i++) {
-        rtuSlave.removeHreg(i + 1, 1);
-        tcpSlave.removeHreg(i + 1, 1);
+    Serial.println("Creating registry");
+    for (int i = 0; i < NUM_REGS; i++) {
+        rtuSlave.addHreg(i + 1, 1);
+        tcpSlave.addHreg(i + 1, 1);
     }
 }
 
@@ -409,21 +413,27 @@ float getPrice(float price)
 void updateRegistry()
 {
     Serial.printf("Prices in memory:\u0020[");
+    int count = 2;
     for (int i = 0; i < *priceLen; i++) {
         int offset = (i * 2) + 2;
         float price = getPrice((float)priceData[i]);
         // https://github.com/emelianov/modbus-esp8266/issues/158
         uint16_t high, low;
         float2IEEE754(price, &high, &low);
-        tcpSlave.addHreg(offset, high, 1);
-        tcpSlave.addHreg(offset + 1, low, 1);
-        rtuSlave.addHreg(offset, high, 1);
-        rtuSlave.addHreg(offset + 1, low, 1);
+        addToHreg(offset, high);
+        addToHreg(offset + 1, low);
         if (i == (*priceLen - 1)) {
             Serial.printf("%f]\n", price);
         } else {
             Serial.printf("%f,\u0020", price);
         }
+        count += offset;
+    }
+    // Pad the rest so the receiving end will reset the values
+    for (size_t i = count; i < NUM_REGS; i++) {
+        Serial.printf("Padding %u\n", i);
+        addToHreg(i, 0);
+        addToHreg(i + 1, 0);
     }
 }
 
@@ -475,6 +485,7 @@ void setup()
     rtuSlave.begin(&MAX_485); // Modbus RTU start
     rtuSlave.slave(slaveId.toInt());
     tcpSlave.begin(); // Modbus TCP start
+    createRegistry();
 }
 
 void loop()
